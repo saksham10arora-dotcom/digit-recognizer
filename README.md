@@ -2,7 +2,7 @@
 
 A very small AI project. Draw a digit from 0 to 9 and a neural network tells you which one it is.
 
-**Live demo:** https://saksham10arora-dotcom.github.io/digit-recognizer/
+**Live demo:** https://saksham.digital/digit-recognizer/
 
 To run the demo without internet, download this repo and double-click `index.html`. Nothing needs installing.
 
