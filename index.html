@@ -58,8 +58,7 @@
   .result { display: grid; grid-template-columns: auto 1fr; gap: 24px; }
   #guess { font-size: 96px; line-height: 1; font-weight: 700; color: var(--accent); min-width: 64px; }
   #note { margin: 8px 0 0; color: var(--muted); font-size: 14px; max-width: 180px; }
-  #eye { display: grid; grid-template-columns: repeat(8, 1fr); gap: 1px; width: 136px; }
-  #eye div { aspect-ratio: 1; background: #111; }
+  #eye { display: block; width: 140px; height: 140px; background: #111; image-rendering: pixelated; }
   .right { display: grid; gap: 20px; align-content: start; }
   .bar { display: grid; grid-template-columns: 16px 1fr 44px; gap: 10px; align-items: center; font-variant-numeric: tabular-nums; font-size: 14px; }
   .track { height: 12px; background: var(--bg); border-radius: 6px; overflow: hidden; }
@@ -93,8 +92,8 @@
           <p id="note">Waiting for a drawing.</p>
         </div>
         <div>
-          <h2>What the AI sees (8x8)</h2>
-          <div id="eye"></div>
+          <h2>What the AI sees (28x28)</h2>
+          <canvas id="eye" width="28" height="28"></canvas>
         </div>
       </div>
       <div class="panel">
@@ -105,8 +104,8 @@
   </div>
 
   <ul class="steps">
-    <li><b>1. Shrink</b>Your drawing is cropped, centred and reduced to 64 pixels.</li>
-    <li><b>2. Think</b>Those 64 numbers pass through 128 hidden neurons.</li>
+    <li><b>1. Shrink</b>Your drawing is cropped, centred and reduced to 784 pixels.</li>
+    <li><b>2. Think</b>Those 784 numbers pass through 128 hidden neurons.</li>
     <li><b>3. Answer</b>10 outputs give a confidence for each digit. <span id="acc"></span></li>
   </ul>
 </main>
@@ -115,15 +114,14 @@
 <script>
   const pad = document.getElementById("pad");
   const ctx = pad.getContext("2d");
-  const eye = document.getElementById("eye");
+  const eye = document.getElementById("eye").getContext("2d");
   const bars = document.getElementById("bars");
   const guess = document.getElementById("guess");
   const note = document.getElementById("note");
 
   document.getElementById("acc").textContent = `Scored ${MODEL.accuracy}% on digits it never saw in training.`;
 
-  // Build the 8x8 preview and the ten confidence bars.
-  const cells = Array.from({ length: 64 }, () => eye.appendChild(document.createElement("div")));
+  // Build the ten confidence bars.
   const rows = Array.from({ length: 10 }, (_, digit) => {
     const row = bars.appendChild(document.createElement("div"));
     row.className = "bar";
@@ -135,7 +133,7 @@
   function predict(pixels) {
     const hidden = MODEL.hidden_bias.map((bias, j) => {
       let sum = bias;
-      for (let i = 0; i < 64; i++) sum += pixels[i] * MODEL.hidden_weights[i][j];
+      for (let i = 0; i < 784; i++) sum += pixels[i] * MODEL.hidden_weights[i][j];
       return Math.max(0, sum); // ReLU
     });
     const scores = MODEL.output_bias.map((bias, k) => {
@@ -149,7 +147,8 @@
     return exps.map(e => e / total);
   }
 
-  // Crop the drawing, centre it and average it down to 8x8, like the training images.
+  // Prepare the drawing the same way MNIST was prepared: fit it in a 20x20 box,
+  // then centre its centre of mass in a 28x28 image.
   function toPixels() {
     const { data, width, height } = ctx.getImageData(0, 0, pad.width, pad.height);
     let left = width, right = -1, top = height, bottom = -1;
@@ -164,21 +163,35 @@
     if (right < 0) return null;
 
     const size = Math.max(right - left + 1, bottom - top + 1);
-    const scale = 7.5 / size;
-    const offsetX = 4 - ((left + right + 1) / 2) * scale;
-    const offsetY = 4 - ((top + bottom + 1) / 2) * scale;
+    const scale = 20 / size;
+    const offsetX = 14 - ((left + right + 1) / 2) * scale;
+    const offsetY = 14 - ((top + bottom + 1) / 2) * scale;
 
-    const pixels = new Array(64).fill(0);
+    const shrunk = new Array(784).fill(0);
     for (let y = top; y <= bottom; y++) {
       for (let x = left; x <= right; x++) {
         const col = Math.floor((x + 0.5) * scale + offsetX);
         const row = Math.floor((y + 0.5) * scale + offsetY);
-        if (col < 0 || col > 7 || row < 0 || row > 7) continue;
-        pixels[row * 8 + col] += data[(y * width + x) * 4 + 3] / 255;
+        shrunk[row * 28 + col] += (data[(y * width + x) * 4 + 3] / 255) * scale * scale;
       }
     }
-    const cellArea = 1 / (scale * scale);
-    return pixels.map(p => Math.min(1, (p / cellArea) * 1.6));
+
+    let mass = 0, massX = 0, massY = 0;
+    shrunk.forEach((value, i) => {
+      mass += value;
+      massX += value * (i % 28);
+      massY += value * Math.floor(i / 28);
+    });
+    const shiftX = Math.round(13.5 - massX / mass);
+    const shiftY = Math.round(13.5 - massY / mass);
+
+    const pixels = new Array(784).fill(0);
+    shrunk.forEach((value, i) => {
+      const col = i % 28 + shiftX;
+      const row = Math.floor(i / 28) + shiftY;
+      if (col >= 0 && col < 28 && row >= 0 && row < 28) pixels[row * 28 + col] = Math.min(1, value);
+    });
+    return pixels;
   }
 
   function show() {
@@ -187,22 +200,24 @@
     const confidence = predict(pixels);
     const best = confidence.indexOf(Math.max(...confidence));
 
-    cells.forEach((cell, i) => {
-      const shade = Math.round(17 + pixels[i] * 238);
-      cell.style.background = `rgb(${shade},${shade},${shade})`;
+    const image = eye.createImageData(28, 28);
+    pixels.forEach((value, i) => {
+      image.data.fill(Math.round(value * 255), i * 4, i * 4 + 3);
+      image.data[i * 4 + 3] = 255;
     });
+    eye.putImageData(image, 0, 0);
     rows.forEach((row, digit) => {
       const percent = Math.round(confidence[digit] * 100);
       row.fill.style.width = percent + "%";
       row.pct.textContent = percent + "%";
     });
     guess.textContent = best;
-    note.textContent = confidence[best] < 0.6 ? "Not sure. Try drawing it bigger." : "Looks like a " + best + ".";
+    note.textContent = confidence[best] < 0.6 ? "Not sure. Try drawing it bigger." : `Looks like ${best === 8 ? "an" : "a"} ${best}.`;
   }
 
   function reset() {
     ctx.clearRect(0, 0, pad.width, pad.height);
-    cells.forEach(cell => { cell.style.background = ""; });
+    eye.clearRect(0, 0, 28, 28);
     rows.forEach(row => { row.fill.style.width = "0"; row.pct.textContent = "0%"; });
     guess.textContent = "?";
     note.textContent = "Waiting for a drawing.";
