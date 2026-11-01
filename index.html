@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Digit Recognizer</title>
+<style>
+  :root {
+    --bg: #f6f5f1;
+    --panel: #ffffff;
+    --ink: #1c1c1a;
+    --muted: #65645e;
+    --line: #dddbd3;
+    --accent: #1f6f5c;
+    --accent-soft: #d5e8e2;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 32px 16px 48px;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 880px; margin: 0 auto; }
+  h1 { margin: 0; font-size: 32px; letter-spacing: -0.02em; }
+  h2 { margin: 0 0 12px; font-size: 14px; font-weight: 600; color: var(--muted); }
+  .lead { margin: 4px 0 28px; color: var(--muted); }
+  .demo { display: grid; grid-template-columns: 320px 1fr; gap: 20px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 20px;
+  }
+  #pad {
+    display: block;
+    width: 100%;
+    aspect-ratio: 1;
+    background: #111;
+    border-radius: 8px;
+    cursor: crosshair;
+    touch-action: none;
+  }
+  button {
+    margin-top: 12px;
+    width: 100%;
+    padding: 10px;
+    font: inherit;
+    font-weight: 600;
+    color: var(--ink);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    cursor: pointer;
+  }
+  button:hover { background: var(--bg); }
+  .result { display: grid; grid-template-columns: auto 1fr; gap: 24px; }
+  #guess { font-size: 96px; line-height: 1; font-weight: 700; color: var(--accent); min-width: 64px; }
+  #note { margin: 8px 0 0; color: var(--muted); font-size: 14px; max-width: 180px; }
+  #eye { display: grid; grid-template-columns: repeat(8, 1fr); gap: 1px; width: 136px; }
+  #eye div { aspect-ratio: 1; background: #111; }
+  .right { display: grid; gap: 20px; align-content: start; }
+  .bar { display: grid; grid-template-columns: 16px 1fr 44px; gap: 10px; align-items: center; font-variant-numeric: tabular-nums; font-size: 14px; }
+  .track { height: 12px; background: var(--bg); border-radius: 6px; overflow: hidden; }
+  .fill { height: 100%; width: 0; background: var(--accent); }
+  .bar .pct { text-align: right; color: var(--muted); }
+  .bars { display: grid; gap: 6px; }
+  .steps { margin: 28px 0 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; color: var(--muted); font-size: 14px; }
+  .steps b { display: block; color: var(--ink); }
+  @media (max-width: 720px) {
+    .demo, .steps { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Digit Recognizer</h1>
+  <p class="lead">Draw a single digit, 0 to 9. A small neural network reads it right here in your browser.</p>
+
+  <div class="demo">
+    <div class="panel">
+      <h2>Draw here</h2>
+      <canvas id="pad" width="280" height="280" aria-label="Drawing area"></canvas>
+      <button id="clear">Clear</button>
+    </div>
+
+    <div class="right">
+      <div class="panel result">
+        <div>
+          <h2>Prediction</h2>
+          <div id="guess">?</div>
+          <p id="note">Waiting for a drawing.</p>
+        </div>
+        <div>
+          <h2>What the AI sees (8x8)</h2>
+          <div id="eye"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Confidence for each digit</h2>
+        <div class="bars" id="bars"></div>
+      </div>
+    </div>
+  </div>
+
+  <ul class="steps">
+    <li><b>1. Shrink</b>Your drawing is cropped, centred and reduced to 64 pixels.</li>
+    <li><b>2. Think</b>Those 64 numbers pass through 128 hidden neurons.</li>
+    <li><b>3. Answer</b>10 outputs give a confidence for each digit. <span id="acc"></span></li>
+  </ul>
+</main>
+
+<script src="model.js"></script>
+<script>
+  const pad = document.getElementById("pad");
+  const ctx = pad.getContext("2d");
+  const eye = document.getElementById("eye");
+  const bars = document.getElementById("bars");
+  const guess = document.getElementById("guess");
+  const note = document.getElementById("note");
+
+  document.getElementById("acc").textContent = `Scored ${MODEL.accuracy}% on digits it never saw in training.`;
+
+  // Build the 8x8 preview and the ten confidence bars.
+  const cells = Array.from({ length: 64 }, () => eye.appendChild(document.createElement("div")));
+  const rows = Array.from({ length: 10 }, (_, digit) => {
+    const row = bars.appendChild(document.createElement("div"));
+    row.className = "bar";
+    row.innerHTML = `<span>${digit}</span><div class="track"><div class="fill"></div></div><span class="pct">0%</span>`;
+    return { fill: row.querySelector(".fill"), pct: row.querySelector(".pct") };
+  });
+
+  // The neural network: the same maths scikit-learn used in training.
+  function predict(pixels) {
+    const hidden = MODEL.hidden_bias.map((bias, j) => {
+      let sum = bias;
+      for (let i = 0; i < 64; i++) sum += pixels[i] * MODEL.hidden_weights[i][j];
+      return Math.max(0, sum); // ReLU
+    });
+    const scores = MODEL.output_bias.map((bias, k) => {
+      let sum = bias;
+      for (let j = 0; j < hidden.length; j++) sum += hidden[j] * MODEL.output_weights[j][k];
+      return sum;
+    });
+    const top = Math.max(...scores);
+    const exps = scores.map(s => Math.exp(s - top)); // softmax
+    const total = exps.reduce((a, b) => a + b, 0);
+    return exps.map(e => e / total);
+  }
+
+  // Crop the drawing, centre it and average it down to 8x8, like the training images.
+  function toPixels() {
+    const { data, width, height } = ctx.getImageData(0, 0, pad.width, pad.height);
+    let left = width, right = -1, top = height, bottom = -1;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        if (data[(y * width + x) * 4 + 3] > 40) {
+          left = Math.min(left, x); right = Math.max(right, x);
+          top = Math.min(top, y); bottom = Math.max(bottom, y);
+        }
+      }
+    }
+    if (right < 0) return null;
+
+    const size = Math.max(right - left + 1, bottom - top + 1);
+    const scale = 7.5 / size;
+    const offsetX = 4 - ((left + right + 1) / 2) * scale;
+    const offsetY = 4 - ((top + bottom + 1) / 2) * scale;
+
+    const pixels = new Array(64).fill(0);
+    for (let y = top; y <= bottom; y++) {
+      for (let x = left; x <= right; x++) {
+        const col = Math.floor((x + 0.5) * scale + offsetX);
+        const row = Math.floor((y + 0.5) * scale + offsetY);
+        if (col < 0 || col > 7 || row < 0 || row > 7) continue;
+        pixels[row * 8 + col] += data[(y * width + x) * 4 + 3] / 255;
+      }
+    }
+    const cellArea = 1 / (scale * scale);
+    return pixels.map(p => Math.min(1, (p / cellArea) * 1.6));
+  }
+
+  function show() {
+    const pixels = toPixels();
+    if (!pixels) return reset();
+    const confidence = predict(pixels);
+    const best = confidence.indexOf(Math.max(...confidence));
+
+    cells.forEach((cell, i) => {
+      const shade = Math.round(17 + pixels[i] * 238);
+      cell.style.background = `rgb(${shade},${shade},${shade})`;
+    });
+    rows.forEach((row, digit) => {
+      const percent = Math.round(confidence[digit] * 100);
+      row.fill.style.width = percent + "%";
+      row.pct.textContent = percent + "%";
+    });
+    guess.textContent = best;
+    note.textContent = confidence[best] < 0.6 ? "Not sure. Try drawing it bigger." : "Looks like a " + best + ".";
+  }
+
+  function reset() {
+    ctx.clearRect(0, 0, pad.width, pad.height);
+    cells.forEach(cell => { cell.style.background = ""; });
+    rows.forEach(row => { row.fill.style.width = "0"; row.pct.textContent = "0%"; });
+    guess.textContent = "?";
+    note.textContent = "Waiting for a drawing.";
+  }
+
+  // Drawing with mouse, finger or stylus.
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.lineWidth = 24;
+  ctx.strokeStyle = "#fff";
+
+  let drawing = false;
+  function point(e) {
+    const box = pad.getBoundingClientRect();
+    return [(e.clientX - box.left) * (pad.width / box.width), (e.clientY - box.top) * (pad.height / box.height)];
+  }
+  pad.addEventListener("pointerdown", e => {
+    drawing = true;
+    pad.setPointerCapture(e.pointerId);
+    ctx.beginPath();
+    ctx.moveTo(...point(e));
+    ctx.lineTo(...point(e));
+    ctx.stroke();
+    show();
+  });
+  pad.addEventListener("pointermove", e => {
+    if (!drawing) return;
+    ctx.lineTo(...point(e));
+    ctx.stroke();
+    show();
+  });
+  pad.addEventListener("pointerup", () => { drawing = false; });
+  pad.addEventListener("pointercancel", () => { drawing = false; });
+  document.getElementById("clear").addEventListener("click", reset);
+</script>
+</body>
+</html>
